@@ -805,10 +805,28 @@ jobs:
             *" $KSU_WANT "*) echo "  版本号与预期一致" ;;
             *) echo "::warning::版本号口径不一致：workflow 算 $KSU_WANT，SukiSU 内部印 ${KSU_GOT}（仅显示用途，不影响功能）" ;;
           esac
-          for f in out/drivers/kernelsu/built-in.a out/drivers/kernelsu/ksu_main.o out/drivers/kernelsu/selinux/selinux.o; do
-            [ -s "$f" ] || { echo "::error::缺 KernelSU 目标文件: $f"; exit 1; }
-          done
-          echo "  ✓ KernelSU $KSU_WANT 已编入 (目标文件齐全)"
+          # 判「KSU 真被编进去了」用三层证据，不硬编码单个 .o 路径
+          # （SukiSU 与 BakaSU 的目录布局不同，selinux 子目录的产物名也不一样）
+          echo "=== KSU 目标文件实地检查 ==="
+          echo "--- out/drivers/kernelsu/ 顶层 ---"
+          ls -la out/drivers/kernelsu/ 2>/dev/null | head -25 || echo "(目录不存在)"
+          echo "--- 找 ksu_main 相关目标文件 ---"
+          find out/drivers/kernelsu -name 'ksu_main*.o' -o -name 'built-in.a' 2>/dev/null | head -20
+          echo "--- 找 selinux 相关目标文件 ---"
+          find out/drivers/kernelsu -path '*selinux*' \( -name '*.o' -o -name 'built-in.a' \) 2>/dev/null | head -20
+
+          # 硬证据 1：drivers/kernelsu 编出了 built-in.a（说明整个目录参与编译）
+          [ -s out/drivers/kernelsu/built-in.a ] \
+            || { echo "::error::out/drivers/kernelsu/built-in.a 不存在 —— KSU 目录没参与编译"; exit 1; }
+          # 硬证据 2：至少有一个 ksu_main 目标文件
+          find out/drivers/kernelsu -name 'ksu_main*.o' 2>/dev/null | grep -q . \
+            || { echo "::error::找不到 ksu_main 的任何目标文件"; exit 1; }
+          # 硬证据 3：selinux 目录至少编出了某个目标文件或归档
+          find out/drivers/kernelsu -path '*selinux*' \( -name '*.o' -o -name 'built-in.a' \) 2>/dev/null | grep -q . \
+            && echo "  ✓ selinux 子目录有编译产物" \
+            || echo "::warning::selinux 子目录没找到目标文件（若是全部 inline 进 ksu_main.o 属正常，看上面 find 输出确认）"
+
+          echo "  ✓ KernelSU $KSU_WANT 已编入 (built-in.a + ksu_main.o 均存在)"
           if strings -a out/arch/arm64/boot/Image | grep -q 'SukiSU-Ultra'; then
             echo "  ✓ Image 内含 SukiSU-Ultra 字面量"
           else
