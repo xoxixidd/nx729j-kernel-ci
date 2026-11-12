@@ -132,7 +132,7 @@ static inline u32 susfs_av_rule_hash(u32 ssid, u32 tsid, u16 tclass)
 	return h;
 }
 
-int susfs_add_sus_avd_allowed_by_type(u32 s_type, u32 t_type, u32 c_type, u32 orig_avd_allowed)
+int susfs_add_sus_avd_allowed_by_type(u32 s_type, u32 t_type, u16 c_type, u32 orig_avd_allowed)
 {
 	struct susfs_sus_av_rule *entry, *tmp_entry;
 	struct hlist_node *tmp_hlist_node;
@@ -196,7 +196,11 @@ DECLS = r'''
 /* === SUSFS 补齐：SukiSU 用到的接口 === */
 int susfs_add_sus_type(const char *secctx, u32 type_value);
 bool susfs_is_sus_type_rcu(u32 type_value);
-int susfs_add_sus_avd_allowed_by_type(u32 s_type, u32 t_type, u32 c_type, u32 orig_avd_allowed);
+int susfs_add_sus_avd_allowed_by_type(u32 s_type, u32 t_type, u16 c_type, u32 orig_avd_allowed);
+/* 注意 c_type 是 u16：SukiSU 的 sepolicy.c 里 extern 声明就是 u16，
+ * 而本脚本的声明在 include/linux/susfs.h 里也被它看见，两边必须一致，
+ * 否则报 conflicting types。能力值本身远小于 65535，截断无害。
+ * 上游 susfs_av_rule_hash 的 tclass 参数本来也是 u16。 */
 void susfs_spoof_avd_allowed_rcu(u32 s_type, u32 t_type, u32 c_type, u32 *avd_allowed);
 '''
 
