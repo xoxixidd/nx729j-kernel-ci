@@ -213,6 +213,14 @@ jobs:
           ref: ${{ steps.ver.outputs.BRANCH }}
           fetch-depth: 0
 
+      - name: 检出 CI 辅助脚本
+        uses: actions/checkout@v4
+        with:
+          # 本仓库（CI 仓）拉到 .ci 子目录，脚本路径用 .ci/...
+          # clean 只清理 .ci，不影响上面检出的源码
+          ref: main
+          path: .ci
+
       - name: 记录产物对应的提交
         id: built
         run: |
@@ -430,7 +438,8 @@ jobs:
           #   susfs_spoof_avd_allowed_rcu        (上游 services.c 用)
           #   susfs_is_sus_type_rcu              (同上)
           # 缺了会让 vmlinux 链接报 undefined symbol。
-          python3 .github/scripts/patch-susfs-avd.py
+          ls -l .ci/.github/scripts/patch-susfs-avd.py
+          python3 .ci/.github/scripts/patch-susfs-avd.py
           echo "=== 复核 ==="
           grep -c 'susfs_add_sus_avd_allowed_by_type' fs/susfs.c
           grep -c 'susfs_add_sus_avd_allowed_by_type' include/linux/susfs.h
