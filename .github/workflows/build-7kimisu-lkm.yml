@@ -322,17 +322,26 @@ jobs:
           wait $MK_PID
           RC=$?
           echo "make 退出码 = $RC"
-          # ★ 判据不用退出码，用产物：
-          #   vmlinux 链接完成 = MODPOST vmlinux.symvers 已经跑过 = out/Module.symvers 存在。
-          #   后面 LD .tmp_vmlinux.btf 之类的收尾步骤失败不影响外部模块编译。
-          if [ -s out/Module.symvers ]; then
-            echo "Module.symvers 已生成（$(wc -l < out/Module.symvers) 条符号），继续"
+
+          # ★ 判据用产物，不用退出码。
+          #   make vmlinux 生成的是 out/vmlinux.symvers（MODPOST 那步），
+          #   而外部模块编的是 $(KDIR)/Module.symvers —— 后者要 make modules 才有。
+          #   两者格式相同（每行: CRC<TAB>符号<TAB>模块<TAB>导出类型），
+          #   kbuild 自己编 modules 时也是把 vmlinux.symvers 合并进 Module.symvers。
+          #   所以我们直接复制一份，让外部模块能读到符号 CRC。
+          if [ -s out/vmlinux.symvers ]; then
+            echo "vmlinux.symvers 已生成（$(wc -l < out/vmlinux.symvers) 条符号）"
+            cp -f out/vmlinux.symvers out/Module.symvers
+            echo "已复制为 out/Module.symvers（$(wc -l < out/Module.symvers) 条）"
+            head -3 out/Module.symvers
             if [ $RC -ne 0 ]; then
-              echo "::warning::make 退出码 $RC（后续步骤失败），但 Module.symvers 已就位"
+              echo "::warning::make 退出码 $RC，但 vmlinux 与 symvers 均已就位"
               tail -20 /tmp/mp.log || true
             fi
+          elif [ -s out/Module.symvers ]; then
+            echo "Module.symvers 已生成（$(wc -l < out/Module.symvers) 条符号）"
           else
-            echo "::error::没有 Module.symvers（rc=$RC）"
+            echo "::error::既没有 vmlinux.symvers 也没有 Module.symvers（rc=$RC）"
             grep -iE "error:|错误|No such file|command not found|fatal|Killed" /tmp/mp.log | tail -40 || true
             echo "──── 完整尾部 60 行 ────"
             tail -60 /tmp/mp.log
