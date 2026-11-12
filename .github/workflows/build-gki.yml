@@ -373,6 +373,23 @@ jobs:
           grep -q 'bool allow_shell = true;' kernel/ksu_main.c \
             || { echo "::error::allow_shell 改写失败：ksu_main.c 里没找到原句"; exit 1; }
           grep -n 'allow_shell' kernel/ksu_main.c | head -3
+
+          # >>> 2026-11-12 新增：删掉「所有 domain 对 su_file 全权限」这条规则 <<<
+          # 源码 kernel/selinux/rules.c（SukiSU builtin 分支）：
+          #   ksu_allow(db, "domain", KERNEL_SU_FILE, ALL, ALL);
+          # 含义是「任何 domain 都能对 su_file 做任何事」。
+          # 正常 Android 设备不存在「某 type 被全部 domain 完全授权」的规则。
+          # Maple 2.3.0「策略跨域授权特征」= 解析 /sys/fs/selinux/policy 抓这类结构，
+          # 本机实测 kernelsu_traits_count=1，其余 20+ 项全 false，就卡这一条。
+          # su domain 自己的 ALL ALL ALL（rules.c 第 92 行）保留 —— root 不依赖这一条。
+          sed -i '/ksu_allow(db, "domain", KERNEL_SU_FILE, ALL, ALL);/d' kernel/selinux/rules.c
+          if grep -q 'ksu_allow(db, "domain", KERNEL_SU_FILE, ALL, ALL);' kernel/selinux/rules.c; then
+            echo "::error::规则删除失败：rules.c 里还留着 domain -> su_file 全权限"
+            exit 1
+          fi
+          echo "OK: 已删除 domain -> su_file 全权限规则"
+          grep -n 'KERNEL_SU_FILE' kernel/selinux/rules.c
+          # >>> 改动结束 <<<
           # （checkout 在 case 块里做，这里已在目标提交上，改完不会被覆盖）
           # 注意：保持在工作目录 KernelSU/ 内，后面 V=$(git rev-list --count HEAD)
           #       要在 KSU 仓库里数提交，不能提前 cd ..
