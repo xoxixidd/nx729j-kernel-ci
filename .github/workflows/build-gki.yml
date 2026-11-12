@@ -1059,15 +1059,14 @@ jobs:
           # ★ --target 必须显式给：不给时 gh 用仓库默认分支建 tag，
           #   而那未必是这次编的代码 —— tag 里的代码与产物会对不上。
           #   优先用「实际编译的那一笔」，退化才用产物分支；两者皆空宁可失败也别发错。
-          TARGET="${{ steps.built.outputs.sha }}"
-          if [ -z "$TARGET" ]; then
-            TARGET="${{ steps.ver.outputs.BRANCH }}"
-            echo "::warning::拿不到产物提交 sha，回退用分支名做 --target: $TARGET"
-          fi
-          if [ -z "$TARGET" ]; then
-            echo "::error::产物提交 sha 与分支名都为空，拒绝发布(否则 tag 会落到仓库默认分支)"
-            exit 1
-          fi
+          # ★ --repo 是 CI 仓（本仓），--target 必须指向本仓存在的 ref。
+          #   源码 commit / 源码分支名在 CI 仓里都不存在，用了会 Not Found 直接失败。
+          #   所以这里固定用 CI 仓默认分支；产物真实来源写进下面 SOURCE_* 并上到 release 正文。
+          TARGET="main"
+          SOURCE_SHA="${{ steps.built.outputs.sha }}"
+          SOURCE_BRANCH="${{ steps.ver.outputs.BRANCH }}"
+          echo "=== 产物来源: xoxixidd/msm-kernel-NX729J  提交 ${SOURCE_SHA:-未知}  分支 ${SOURCE_BRANCH:-未知} ==="
+          echo "=== Release 发到 CI 仓 $GITHUB_REPOSITORY  target=$TARGET ==="
           echo "=== 发布 Release: $TAG  (--target $TARGET) ==="
           if ls AnyKernel3-NX729J-*.zip >/dev/null 2>&1; then
             gh release create "$TAG" AnyKernel3-NX729J-*.zip --repo "$GITHUB_REPOSITORY" --target "$TARGET" --title "NX729J-build-$VER_ACTUAL" --notes-file release_body.md
