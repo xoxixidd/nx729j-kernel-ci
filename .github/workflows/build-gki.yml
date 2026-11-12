@@ -362,6 +362,17 @@ jobs:
           grep -q '#define KERNEL_SU_FILE "su_file"' kernel/selinux/selinux.h \
             || { echo "::error::domain 改名失败：selinux.h 里没找到 KERNEL_SU_FILE \"ksu_file\""; exit 1; }
           grep -n 'KERNEL_SU_DOMAIN\|KERNEL_SU_FILE' kernel/selinux/selinux.h
+
+          # ★ 让 shell(uid 2000) 默认拥有 root：改编译期默认值
+          #   ksu_main.c: bool allow_shell = IS_ENABLED(CONFIG_KSU_DEBUG);
+          #   本内核 CONFIG_KSU_DEBUG 未开 -> allow_shell=false
+          #   -> allowlist.c: __ksu_is_allow_uid(2000) 恒 false
+          #   -> sucompat 不接管 /system/bin/su 的 execve -> sh 报 inaccessible or not found
+          #   2026-11-12 实测：改 boot / vendor_boot cmdline 传 allow_shell=1 无效
+          sed -i 's/bool allow_shell = IS_ENABLED(CONFIG_KSU_DEBUG);/bool allow_shell = true;/' kernel/ksu_main.c
+          grep -q 'bool allow_shell = true;' kernel/ksu_main.c \
+            || { echo "::error::allow_shell 改写失败：ksu_main.c 里没找到原句"; exit 1; }
+          grep -n 'allow_shell' kernel/ksu_main.c | head -3
           # （checkout 在 case 块里做，这里已在目标提交上，改完不会被覆盖）
           # 注意：保持在工作目录 KernelSU/ 内，后面 V=$(git rev-list --count HEAD)
           #       要在 KSU 仓库里数提交，不能提前 cd ..
