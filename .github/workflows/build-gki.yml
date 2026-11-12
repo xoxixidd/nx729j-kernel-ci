@@ -791,11 +791,19 @@ jobs:
           KSU_GOT=$(grep -oE 'SukiSU-Ultra version: [0-9]+' build.log 2>/dev/null | awk '{print $NF}' | sort -u | tr '\n' ' ') || true
           echo "  期望版本号: $KSU_WANT"
           echo "  build.log 里打印的版本号: ${KSU_GOT:-（无）}"
+          # ★ 版本号只作参考，不作失败判据。
+          #   两处算 KSU_VERSION 的口径不同：
+          #     workflow  : 40000 + $(git rev-list --count HEAD) - 2815
+          #     SukiSU 内部: kernel/Makefile 自己算（shallow clone / --all 差异）
+          #   实测同一 commit 得到 41874 与 41176，差 698。
+          #   这个数字只显示在管理器界面上；管理器认内核靠的是签名 + KSU_EXPECTED_SIZE/HASH，
+          #   不是这个数。所以这里降级成 warning。
+          #   真正证明「KSU 被编进去」的是下面那三个目标文件 + Image 里的字面量。
           case " $KSU_GOT " in
-            *" $KSU_WANT "*) ;;
-            *) echo "::error::KSU 版本号不符: 期望 $KSU_WANT, build.log 里是 [${KSU_GOT:-空}]"
-               echo "::error::（打印为空 ⇒ CONFIG_KSU 没生效, 或 kbuild 没下降到 drivers/kernelsu）"
-               exit 1 ;;
+            "") echo "::error::build.log 里没有 'SukiSU-Ultra version:' 打印 ⇒ CONFIG_KSU 没生效，或 kbuild 没下降到 drivers/kernelsu"
+                exit 1 ;;
+            *" $KSU_WANT "*) echo "  版本号与预期一致" ;;
+            *) echo "::warning::版本号口径不一致：workflow 算 $KSU_WANT，SukiSU 内部印 ${KSU_GOT}（仅显示用途，不影响功能）" ;;
           esac
           for f in out/drivers/kernelsu/built-in.a out/drivers/kernelsu/ksu_main.o out/drivers/kernelsu/selinux/selinux.o; do
             [ -s "$f" ] || { echo "::error::缺 KernelSU 目标文件: $f"; exit 1; }
