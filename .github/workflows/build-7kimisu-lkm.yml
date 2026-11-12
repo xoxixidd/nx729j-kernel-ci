@@ -1,0 +1,399 @@
+name: Build 7kimisu LKM for NX729J
+
+# 用 7kimisu 的 kernel/ 源码 + 本机内核树(5.15.167) 编出 vermagic 匹配的 kernelsu.ko
+# 产物：kernelsu.ko（配套 7kimisu v2.30 的 ksuinit 重新打包 init_boot）
+#
+# 为什么不用 7kimisu 官方 APK 里那个 .ko：
+#   它是用 AOSP GKI 5.15.202 编的，vermagic = 5.15.202-android13-5.15.202_r00-dirty
+#   本机内核是 5.15.167-android13-8-00017-gb1f32b310a30-ab12826353
+#   且 CONFIG_MODULE_FORCE_LOAD 未设 → insmod 必报 Invalid module format
+
+on:
+  workflow_dispatch:
+    inputs:
+      sevenk_ref:
+        description: '7kimisu 版本（tag/分支/提交）'
+        required: false
+        default: 'v2.30'
+      custom_version:
+        description: '内核版本串（必须与 uname -r 完全一致）'
+        required: false
+        default: '5.15.167-android13-8-00017-gb1f32b310a30-ab12826353'
+
+env:
+  TZ: Asia/Shanghai
+  CLANG_VER: r450784d
+  KBUILD_BUILD_TIMESTAMP: "Wed Apr  3 09:12:45 UTC 2024"
+
+jobs:
+  build-lkm:
+    runs-on: ubuntu-latest
+    timeout-minutes: 120
+
+    steps:
+      - name: 设置版本参数
+        id: ver
+        run: |
+          set -e
+          echo "BRANCH=nx729j-5.15.167" >> "$GITHUB_OUTPUT"
+          KV="${{ inputs.custom_version }}"
+          PREFIX="5.15.167"
+          if [[ "$KV" != "$PREFIX"* ]]; then
+            echo "::error::custom_version 必须以 $PREFIX 开头，当前是 $KV"
+            exit 1
+          fi
+          SCM="${KV#"$PREFIX"}"
+          echo "SCM_VER=$SCM" >> "$GITHUB_OUTPUT"
+          echo "VERSION_FULL=$KV" >> "$GITHUB_OUTPUT"
+          echo "版本串: $KV  (scm 后缀: $SCM)"
+          echo "7kimisu ref: ${{ inputs.sevenk_ref }}"
+
+      - name: 检出内核源码
+        uses: actions/checkout@v4
+        with:
+          ref: nx729j-5.15.167
+          fetch-depth: 1
+          path: kernel-tree
+
+      - name: 版本串对齐（写 .scmversion）
+        working-directory: kernel-tree
+        run: |
+          set -e
+          SCM="${{ steps.ver.outputs.SCM_VER }}"
+          if [ -n "$SCM" ]; then
+            printf '%s' "$SCM" > .scmversion
+            echo "写 .scmversion: $SCM"
+          else
+            rm -f .scmversion
+            echo "无 scm 后缀"
+          fi
+          grep -E '^(VERSION|PATCHLEVEL|SUBLEVEL) ' Makefile
+
+      - name: 装编译依赖（绕过 apt，IP 直连 .deb）
+        run: |
+          set -e
+          # ── 为什么不用 apt ────────────────────────────────────────────────
+          # runner 的 apt 源 azure.archive.ubuntu.com 整个 job 期间解析失败，
+          # archive/security.ubuntu.com 也跟着失败（历次日志实证）。
+          # 但官方 archive 的 IP 是通的，直接 curl .deb 绕过 mirror 逻辑。
+          #
+          # 包清单来自 apt 自己报的 "The following NEW packages will be installed"：
+          #   libelf-dev libdw-dev liblzma-dev ccache dwarves(pahole) libhiredis1.1.0
+          # 合计 1.43 MB
+          # ──────────────────────────────────────────────────────────────────
+          check_all() {
+            [ -f /usr/include/libelf.h ] || return 1
+            [ -f /usr/include/elfutils/libdw.h ] || return 1
+            command -v ccache >/dev/null 2>&1 || return 1
+            command -v pahole >/dev/null 2>&1 || return 1
+            return 0
+          }
+
+          if check_all; then
+            echo "依赖已齐，跳过下载"
+          else
+            MIRROR="http://91.189.91.81/ubuntu"
+            TMP=$(mktemp -d); cd "$TMP"
+
+            for p in \
+              pool/main/e/elfutils/libelf-dev_0.190-1.1ubuntu0.1_amd64.deb \
+              pool/main/e/elfutils/libdw-dev_0.190-1.1ubuntu0.1_amd64.deb \
+              pool/main/x/xz-utils/liblzma-dev_5.6.1+really5.4.5-1ubuntu0.4_amd64.deb \
+              pool/universe/c/ccache/ccache_4.9.1-1_amd64.deb \
+              pool/universe/d/dwarves/dwarves_1.25-0ubuntu3_all.deb \
+              pool/universe/d/dwarves/pahole_1.25-0ubuntu3_amd64.deb \
+              pool/universe/h/hiredis/libhiredis1.1.0_1.2.0-6ubuntu3_amd64.deb
+            do
+              echo "  下载 $(basename "$p")"
+              curl -fsSL --retry 3 --retry-delay 3 --connect-timeout 20 -O "$MIRROR/$p" \
+                || { echo "::error::下载失败 $p"; exit 1; }
+            done
+
+            echo "=== dpkg -i ==="
+            sudo dpkg -i ./*.deb || {
+              echo "::warning::dpkg 报依赖问题（通常是 libelf1/libdw1 运行时包），尝试补齐"
+              sudo apt-get install -f -y || true
+            }
+          fi
+
+          echo "=== 校验 ==="
+          for f in /usr/include/libelf.h /usr/include/elfutils/libdw.h; do
+            [ -f "$f" ] && echo "  OK $f" || echo "  MISSING $f"
+          done
+          command -v ccache && ccache --version | head -n1
+          command -v pahole && pahole --version
+
+      - name: 检查工具链（不装包）
+        run: |
+          MISSING=""
+          for t in make gcc clang python3 git tar curl flex bison bc bzip2 lz4 cpio; do
+            printf '  %-10s ' "$t"
+            if command -v "$t" >/dev/null 2>&1; then
+              echo OK
+            else
+              echo "缺失"
+              MISSING="$MISSING $t"
+            fi
+          done
+          echo "缺失:[${MISSING}]"
+          # ★ 注意：不能写 for loop + `cmd && {...}`。
+          #   MISSING 为空时 grep 返回 1，&& 短路，for 循环最后一条命令的退出码就是 1，
+          #   set -e 会直接把整个 step 杀掉（上一轮就是这么失败的）。
+          #   用 if 包起来，if 不会触发 set -e。
+          for hard in flex bison bc; do
+            if echo "$MISSING" | grep -qw "$hard"; then
+              echo "::error::缺少硬依赖 $hard"
+              exit 1
+            fi
+          done
+          echo "硬依赖齐全"
+      - name: 下载 AOSP clang
+        run: |
+          set -e
+          echo "下载 clang-${CLANG_VER}..."
+          mkdir -p clang
+          curl -fL --retry 10 --retry-delay 5 --retry-all-errors \
+            "https://android.googlesource.com/platform/prebuilts/clang/host/linux-x86/+archive/refs/tags/android-platform-13.0.0_r28/clang-${CLANG_VER}.tar.gz" -o clang.tar.gz
+          tar -xzf clang.tar.gz -C clang
+          rm -f clang.tar.gz
+          clang/bin/clang --version | head -n1
+          echo "CLANG_DIR=$PWD/clang/bin" >> "$GITHUB_ENV"
+
+      - name: 克隆 7kimisu 源码
+        run: |
+          set -e
+          REF="${{ inputs.sevenk_ref }}"
+          git clone --quiet https://github.com/hartgerinktarcila-design/7kimisu KernelSU
+          cd KernelSU
+          if [ -n "$REF" ]; then
+            git checkout --quiet "$REF" || { echo "::error::7kimisu 没有 ref: $REF"; exit 1; }
+          fi
+          echo "7kimisu 提交: $(git rev-parse --short=12 HEAD)"
+          echo "版本: $(git describe --tags --always 2>/dev/null || echo unknown)"
+          # 校验关键文件
+          [ -f kernel/Kbuild ]   || { echo "::error::缺 kernel/Kbuild"; exit 1; }
+          [ -f kernel/Makefile ] || { echo "::error::缺 kernel/Makefile"; exit 1; }
+          [ -f kernel/Kconfig ]  || { echo "::error::缺 kernel/Kconfig"; exit 1; }
+          ls kernel/ | head -20
+
+      - name: 改 SELinux domain 名（ksu -> su）
+        run: |
+          set -e
+          cd KernelSU
+          sed -i 's/#define KERNEL_SU_DOMAIN "ksu"/#define KERNEL_SU_DOMAIN "su"/' kernel/selinux/selinux.h
+          sed -i 's/#define KERNEL_SU_FILE "ksu_file"/#define KERNEL_SU_FILE "su_file"/' kernel/selinux/selinux.h
+          grep -q '#define KERNEL_SU_DOMAIN "su"' kernel/selinux/selinux.h \
+            || { echo "::error::domain 改名失败"; exit 1; }
+          grep -q '#define KERNEL_SU_FILE "su_file"' kernel/selinux/selinux.h \
+            || { echo "::error::file 改名失败"; exit 1; }
+          echo "=== 改名结果 ==="
+          grep -n 'KERNEL_SU_DOMAIN\|KERNEL_SU_FILE' kernel/selinux/selinux.h
+
+      - name: 把 7kimisu 接到内核树
+        run: |
+          set -e
+          cd kernel-tree
+          # 原有软链接 drivers/kernelsu 指向 ../KernelSU/kernel
+          # 我们换成指向上一层的 KernelSU（因为 clone 在 workspace 根）
+          rm -f drivers/kernelsu
+          ln -s ../../KernelSU/kernel drivers/kernelsu
+          echo "=== 软链接 ==="
+          ls -l drivers/kernelsu
+          echo "=== 目标是否存在 ==="
+          ls drivers/kernelsu/ | head -10
+          echo "=== drivers/Makefile ==="
+          grep kernelsu drivers/Makefile || echo "obj-\$(CONFIG_KSU) += kernelsu/" >> drivers/Makefile
+          grep kernelsu drivers/Makefile
+          echo "=== drivers/Kconfig ==="
+          grep kernelsu drivers/Kconfig || echo 'source "drivers/kernelsu/Kconfig"' >> drivers/Kconfig
+          grep kernelsu drivers/Kconfig
+
+      - name: 合并 defconfig + 开启 CONFIG_KSU=m
+        working-directory: kernel-tree
+        run: |
+          set -e
+          export PATH="$CLANG_DIR:$PATH"
+          export ARCH=arm64
+          export SUBARCH=arm64
+          export LLVM=1
+          export LLVM_IAS=1
+          export KCFLAGS="-D__ANDROID_COMMON_KERNEL__"
+
+          # 用 5.15.167 的 merge 模式配置（与 build-gki.yml 一致）
+          if [ -f arch/arm64/configs/vendor/kalama-NX729J-gki_defconfig ]; then
+            echo "用现成的 vendor/kalama-NX729J-gki_defconfig"
+            make O=out ARCH=arm64 LLVM=1 vendor/kalama-NX729J-gki_defconfig
+          else
+            echo "没有现成 defconfig，用 gki_defconfig"
+            make O=out ARCH=arm64 LLVM=1 gki_defconfig
+          fi
+
+          # 打开 KSU 模块模式
+          ./scripts/config --file out/.config \
+            -e MODULES \
+            -m KSU \
+            -e KSU_MANUAL_SU \
+            -e KPROBES \
+            -e KRETPROBES \
+            -e HAVE_SYSCALL_TRACEPOINTS \
+            -e MODULE_UNLOAD \
+            -e KALLSYMS_ALL
+          # SUSFS 在 7kimisu 里没有对应 Kconfig，跳过
+
+          make O=out ARCH=arm64 LLVM=1 olddefconfig
+
+          echo "=== 关键配置核验 ==="
+          grep -E '^CONFIG_(KSU|MODULES|KPROBES|MODVERSIONS|MODULE_SIG_FORCE|MODULE_FORCE_LOAD)=' out/.config || true
+          grep -q '^CONFIG_KSU=m' out/.config || { echo "::error::CONFIG_KSU 没设成 m"; grep KSU out/.config | head; exit 1; }
+
+      - name: 准备 swap (FullLTO 链接内存峰值兜底)
+        run: |
+          set -e
+          echo "=== swap 前 ==="; free -m; df -h /
+          avail=$(df -BG --output=avail / | tail -1 | tr -dc '0-9')
+          echo "根分区可用: ${avail}G"
+          # FullLTO + CFI + DWARF 的 vmlinux 链接是单进程内存大户；仅靠 16G 物理内存会
+          # 被外部 SIGTERM 掐掉（exit 143），所以补一块 swap 兜底。按剩余磁盘决定大小。
+          SIZE=""
+          if   [ "${avail:-0}" -ge 60 ]; then SIZE=24G
+          elif [ "${avail:-0}" -ge 36 ]; then SIZE=16G
+          elif [ "${avail:-0}" -ge 24 ]; then SIZE=8G
+          fi
+          if [ -z "$SIZE" ]; then
+            echo "!! 磁盘不足 24G，跳过 swap（内存峰值风险自负）"; free -m; exit 0
+          fi
+          echo "选定 swap 大小: $SIZE"
+          # 注意：runner 镜像自带的 swap 就在 /swapfile（只有 3G），与本步骤同路径。
+          # 上一版写成「已存在 /swapfile 就跳过」，结果 16G 从未真正建立（实测日志：
+          # 选定 16G -> 已存在 -> Swap 仍是 3071MB），等于没加。这里改为按大小比对，
+          # 不够就先 swapoff 再重建。
+          CUR=$(swapon --show=NAME,SIZE --noheadings 2>/dev/null | awk '$1=="/swapfile"{print $2; exit}')
+          if [ -n "$CUR" ] && [ "${CUR%G}" -ge "${SIZE%G}" ] 2>/dev/null; then
+            echo "现有 /swapfile 已是 $CUR >= $SIZE，无需重建"
+          else
+            echo "现有 /swapfile: ${CUR:-无} -> 重建为 $SIZE"
+            sudo swapoff /swapfile 2>/dev/null || true
+            sudo rm -f /swapfile
+            sudo fallocate -l "$SIZE" /swapfile || \
+              sudo dd if=/dev/zero of=/swapfile bs=1M count=$(( ${SIZE%G} * 1024 )) status=none
+            sudo chmod 600 /swapfile
+            sudo mkswap /swapfile
+            sudo swapon /swapfile
+          fi
+          # 让内核更早把冷页换出去，给单进程大分配让路（一次性 runner，无副作用）
+          sudo sysctl -w vm.swappiness=100 || true
+          echo "=== swap 后 ==="; free -m; swapon --show
+
+      - name: 编译 vmlinux（生成 Module.symvers）
+        working-directory: kernel-tree
+        run: |
+          export PATH="$CLANG_DIR:$PATH"
+          export ARCH=arm64 SUBARCH=arm64 LLVM=1 LLVM_IAS=1
+          export KCFLAGS="-D__ANDROID_COMMON_KERNEL__"
+          # ★ 不再用 modules_prepare —— 它不生成 Module.symvers。
+          #   本机 CONFIG_MODVERSIONS=y，模块必须带正确的符号 CRC 才能加载，
+          #   而 Module.symvers 只有链接出 vmlinux 才生成。
+          #   所以这里编 vmlinux（比全量 make 少编 modules/dtbs）。
+          #
+          # ★ 输出必须实时可见：上一轮把 make 全重定向到 /tmp/mp.log，
+          #   25 分钟零输出，被外部 SIGTERM 杀（exit 143）。
+          #   现在用 tee 同时进日志和 stdout，并每 30 秒打一次心跳。
+          echo "=== 编译 vmlinux（生成 Module.symvers）==="
+          make O=out ARCH=arm64 LLVM=1 -j$(nproc) vmlinux 2>&1 | tee /tmp/mp.log &
+          MK_PID=$!
+
+          HB=0
+          while kill -0 $MK_PID 2>/dev/null; do
+            sleep 30
+            HB=$((HB+1))
+            if kill -0 $MK_PID 2>/dev/null; then
+              echo "[心跳 $HB] 编译进行中，$(date -u +%H:%M:%S)  log 行数=$(wc -l < /tmp/mp.log 2>/dev/null || echo 0)  可用内存=$(free -m | awk '/^Mem:/{print $7}')M"
+            fi
+          done
+
+          wait $MK_PID
+          RC=$?
+          if [ $RC -ne 0 ]; then
+            echo "::error::编译失败（rc=$RC）"
+            grep -iE "error:|错误|No such file|command not found|fatal|Killed" /tmp/mp.log | tail -40 || true
+            echo "──── 完整尾部 60 行 ────"
+            tail -60 /tmp/mp.log
+            exit 1
+          fi
+          echo "vmlinux 编译成功"
+          echo "=== 检查 Module.symvers ==="
+          if [ -s out/Module.symvers ]; then
+            echo "  Module.symvers 存在，$(wc -l < out/Module.symvers) 条符号"
+            head -3 out/Module.symvers
+          else
+            echo "::error::没有 Module.symvers，模块加载会因符号 CRC 缺失失败"
+            exit 1
+          fi
+          echo "=== 本机 vermagic 期望值 ==="
+          make O=out ARCH=arm64 LLVM=1 kernelrelease 2>/dev/null     || \
+          cat out/include/config/kernel.release 2>/dev/null         || \
+          echo "::error::取不到 kernelrelease"
+          # modules_prepare 不会生成 Module.symvers，需要注意
+          ls -l out/Module.symvers 2>/dev/null || echo "(没有 Module.symvers，外部模块可能报 undefined symbol)"
+
+      - name: 确认 kernelsu.ko 产出
+        working-directory: kernel-tree
+        run: |
+          set -e
+          echo "=== 在 out/ 里找 kernelsu.ko ==="
+          find out -name "kernelsu.ko" -o -name "kernelsu.ko.*" 2>/dev/null | head -10
+          KO=$(find out -name "kernelsu.ko" 2>/dev/null | head -1)
+          if [ -z "$KO" ]; then
+            echo "::error::完整编译后仍没有 kernelsu.ko —— 可能 CONFIG_KSU 没生效"
+            grep -E '^CONFIG_KSU' out/.config || echo "(config 里没有 CONFIG_KSU)"
+            ls out/drivers/kernelsu/ 2>/dev/null || echo "(out/drivers/kernelsu 不存在)"
+            exit 1
+          fi
+          echo "找到: $KO"
+          ls -l "$KO"
+          mkdir -p "$GITHUB_WORKSPACE/artifacts"
+          cp "$KO" "$GITHUB_WORKSPACE/artifacts/kernelsu.ko"
+
+      - name: 校验 vermagic
+        run: |
+          set -e
+          KO=$(find KernelSU -name "kernelsu.ko" | head -1)
+          if [ -z "$KO" ]; then
+            echo "::error::没找到 kernelsu.ko"
+            find KernelSU -name "*.ko" | head
+            exit 1
+          fi
+          echo "产物: $KO"
+          ls -l "$KO"
+          file "$KO"
+          echo "=== vermagic ==="
+          VM=$(strings -a "$KO" | grep -m1 '^vermagic=')
+          echo "  $VM"
+          WANT="5.15.167"
+          if echo "$VM" | grep -q "$WANT"; then
+            echo "  ✅ vermagic 含 $WANT"
+          else
+            echo "::error::vermagic 不含 $WANT —— 与内核不匹配，刷了也加载不了"
+            exit 1
+          fi
+          echo "=== modinfo ==="
+          strings -a "$KO" | grep -E '^(name|vermagic|srcversion|license|author|description)=' | head -10
+          mkdir -p artifacts
+          cp "$KO" artifacts/
+          cp "$KO" "artifacts/kernelsu-$(echo $WANT)-aarch64.ko"
+
+      - name: 上传产物
+        uses: actions/upload-artifact@v4
+        with:
+          name: 7kimisu-lkm-5.15.167
+          path: artifacts/*.ko
+          if-no-files-found: error
+
+      - name: 上传诊断日志
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: diag-7kimisu-lkm
+          path: |
+            kernel-tree/out/.config
+          if-no-files-found: warn
