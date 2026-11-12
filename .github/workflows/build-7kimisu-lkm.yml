@@ -369,7 +369,15 @@ jobs:
           export PATH="$CLANG_DIR:$PATH"
 
           KTREE="$PWD"
-          KSRC="$PWD/KernelSU/kernel"
+          # ★ 7kimisu 源码 clone 在 workspace 根，不在 kernel-tree 下：
+          #     git clone ... KernelSU              -> $GITHUB_WORKSPACE/KernelSU
+          #     ln -s ../../KernelSU/kernel ...     -> 从 kernel-tree/drivers/ 指出去
+          #   所以这里要退回上一层找，不能按 $PWD/KernelSU 取。
+          KSRC="$GITHUB_WORKSPACE/KernelSU/kernel"
+          if [ ! -d "$KSRC" ]; then
+            echo "::warning::$KSRC 不存在，在 GITHUB_WORKSPACE 下搜 KernelSU/kernel"
+            KSRC=$(find "$GITHUB_WORKSPACE" -maxdepth 3 -type d -path "*/KernelSU/kernel" 2>/dev/null | head -1)
+          fi
 
           echo "=== 前置确认 ==="
           ls -l out/Module.symvers
