@@ -362,23 +362,49 @@ jobs:
           # modules_prepare 不会生成 Module.symvers，需要注意
           ls -l out/Module.symvers 2>/dev/null || echo "(没有 Module.symvers，外部模块可能报 undefined symbol)"
 
-      - name: 确认 kernelsu.ko 产出
+      - name: 编译 kernelsu 模块并确认
         working-directory: kernel-tree
         run: |
           set -e
-          echo "=== 在 out/ 里找 kernelsu.ko ==="
-          find out -name "kernelsu.ko" -o -name "kernelsu.ko.*" 2>/dev/null | head -10
-          KO=$(find out -name "kernelsu.ko" 2>/dev/null | head -1)
+          export PATH="$CLANG_DIR:$PATH"
+
+          KTREE="$PWD"
+          KSRC="$PWD/KernelSU/kernel"
+
+          echo "=== 前置确认 ==="
+          ls -l out/Module.symvers
+          echo "  Module.symvers $(wc -l < out/Module.symvers) 条符号"
+          grep -E '^CONFIG_(KSU|MODVERSIONS|MODULES)=' out/.config
+          [ -f "$KSRC/Makefile" ] || { echo "::error::$KSRC/Makefile 不存在"; exit 1; }
+
+          # ★ make vmlinux 不编模块，必须显式 make modules。
+          #   这里只编 KSU 这一个外部模块（M=$KSRC），不碰内核里其它模块。
+          #   Module.symvers 由上一步「编译 vmlinux」生成后复制过来，
+          #   外部模块靠它拿到每个内核导出符号的 CRC（CONFIG_MODVERSIONS=y 必需）。
+          echo "=== 编译 kernelsu.ko（out-of-tree, M=$KSRC）==="
+          make -C "$KTREE" O="$KTREE/out" ARCH=arm64 LLVM=1 \
+               M="$KSRC" CONFIG_KSU=m modules 2>&1 | tee /tmp/mod.log
+
+          echo "=== 找 kernelsu.ko ==="
+          find "$KTREE/out" "$KSRC" -name 'kernelsu.ko' 2>/dev/null | head -10
+          KO=$(find "$KTREE/out" "$KSRC" -name 'kernelsu.ko' 2>/dev/null | head -1)
           if [ -z "$KO" ]; then
-            echo "::error::完整编译后仍没有 kernelsu.ko —— 可能 CONFIG_KSU 没生效"
-            grep -E '^CONFIG_KSU' out/.config || echo "(config 里没有 CONFIG_KSU)"
-            ls out/drivers/kernelsu/ 2>/dev/null || echo "(out/drivers/kernelsu 不存在)"
+            echo "::error::make modules 之后仍然没有 kernelsu.ko"
+            echo "--- /tmp/mod.log 尾部 40 行 ---"
+            tail -40 /tmp/mod.log || true
+            echo "--- KSRC 目录内容 ---"
+            ls -la "$KSRC" | head -25
             exit 1
           fi
+
           echo "找到: $KO"
           ls -l "$KO"
+          echo "=== vermagic ==="
+          strings -a "$KO" | grep -E '^vermagic=' || modinfo "$KO" 2>/dev/null | grep -i vermagic || true
+
           mkdir -p "$GITHUB_WORKSPACE/artifacts"
           cp "$KO" "$GITHUB_WORKSPACE/artifacts/kernelsu.ko"
+          echo "已复制到 artifacts/kernelsu.ko"
 
       - name: 校验 vermagic
         run: |
