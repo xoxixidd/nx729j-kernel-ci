@@ -51,6 +51,8 @@ jobs:
       - name: 检出内核源码
         uses: actions/checkout@v4
         with:
+          # 源码在另一个仓库；checkout 到 kernel-tree 子目录
+          repository: xoxixidd/msm-kernel-NX729J
           ref: nx729j-5.15.167
           fetch-depth: 1
           path: kernel-tree
